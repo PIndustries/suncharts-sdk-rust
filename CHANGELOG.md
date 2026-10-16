@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0 — 2026-10-16
+- New `generated` module: every operation and model in the SunCharts OpenAPI spec (`openapi.json`, API 1.1.0),
+  generated with openapi-generator 7.26.0 (`scripts/generate.sh`; CI fails if it is stale). Spec changes arrive
+  as automated pull requests.
+- `Client::api_config()` / `UserSession::api_config()`: authenticated configuration for the generated functions
+  (OAuth2 token cached and refreshed by the client).
+- New dependency `serde_with` (used by generated models); `reqwest` gains the `multipart` feature.
+- No changes to the existing hand-written API.
+
 ## 0.3.0 — 2026-10-16
 - First public release (`PIndustries/suncharts-sdk-rust`).
 - OAuth2 client credentials via `POST /oauth/token` (HTTP Basic, form); falls back to the legacy token endpoint.

@@ -27,3 +27,14 @@ jobs:
         with: { fetch-depth: 0 }
       - name: gitleaks (full history)
         run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.21.2 git --no-banner --redact /repo
+  generated-up-to-date:
+    # src/generated must be exactly what scripts/generate.sh produces from openapi.json.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: rustfmt }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21" }
+      - run: scripts/generate.sh
+      - run: git status --porcelain && git diff --exit-code

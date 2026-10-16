@@ -10,7 +10,7 @@ Official async Rust client for the **SunCharts API**.
 
 ```toml
 [dependencies]
-suncharts-sdk = { git = "https://github.com/PIndustries/suncharts-sdk-rust", tag = "v0.3.0" }
+suncharts-sdk = { git = "https://github.com/PIndustries/suncharts-sdk-rust", tag = "v0.4.0" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -59,6 +59,21 @@ client.update_auth_settings(&AuthSettingsPatch {
 let sent = client.for_end_user_ip("203.0.113.7").request_sign_in_link("user@example.com", device_nonce).await?;
 if let Some(d) = sent.delivery { /* email d.token / d.code to the user yourself */ }
 ```
+
+## Generated operations
+
+`suncharts_sdk::generated` contains every operation and model in the public OpenAPI spec, regenerated whenever
+the API changes, so nothing is missing even before it gets a hand-written helper:
+
+```rust
+use suncharts_sdk::generated::apis::{partner_api, appointments_api};
+let page = partner_api::partner_list_tenants(&client.api_config().await?).await?;
+let session = client.session(tokens);                     // end-user session
+let today = appointments_api::today(&session.api_config().await?, None, None, None, None).await?;
+```
+
+`scripts/generate.sh` regenerates `src/generated` from `openapi.json` (Java 11+); don't edit it by hand.
+`examples/sandbox_smoke.rs` runs a token + read calls against the sandbox.
 
 ## Errors
 

@@ -1,6 +1,6 @@
 [package]
 name = "suncharts-sdk"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Official async Rust client for the SunCharts API: OAuth2 client credentials, API keys, white-label auth relay, FHIR chart data"
 license = "MIT OR Apache-2.0"
@@ -14,9 +14,10 @@ rust-version = "1.88"
 exclude = ["/.github"]
 
 [dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_with = { version = "3", default-features = false, features = ["macros"] }
 thiserror = "2"
 tokio = { version = "1", features = ["sync", "time"] }
 url = "2"
