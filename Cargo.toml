@@ -10,7 +10,7 @@ documentation = "https://docs.rs/suncharts-sdk"
 readme = "README.md"
 keywords = ["suncharts", "ehr", "fhir", "api-client", "oauth2"]
 categories = ["api-bindings", "web-programming::http-client"]
-rust-version = "1.80"
+rust-version = "1.85"
 exclude = ["/.github"]
 
 [dependencies]
