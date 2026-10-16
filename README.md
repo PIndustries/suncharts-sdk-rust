@@ -10,7 +10,7 @@ Official async Rust client for the **SunCharts API**.
 
 ```toml
 [dependencies]
-suncharts-sdk = { git = "https://github.com/PIndustries/suncharts-sdk-rust", tag = "v0.4.0" }
+suncharts-sdk = { git = "https://github.com/PIndustries/suncharts-sdk-rust", tag = "26.10.16.1" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -89,3 +89,9 @@ SemVer. The API is versioned by path (`/api/v1`, additive changes only). See the
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
+
+## Versioning
+
+Releases use the P.Industries format `YY.MM.DD.<build-of-day>` (UTC date), e.g. `26.10.16.1`; the git tag is exactly
+that (no `v`). Cargo needs 3-part SemVer, so the crate version is `YY.(MM*100+DD).BUILD`: `26.10.16.1` → `26.1016.1` (Jan 5 → `27.105.1`; ordering is preserved). Bump with `scripts/version.sh set $(scripts/version.sh next)`; merging a `VERSION` change to
+`main` tags the release automatically (`.github/workflows/release.yml`).

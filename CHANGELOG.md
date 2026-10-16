@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.4.0 — 2026-10-16
+## 26.10.16.1 — 2026-10-16
+
+- Adopted P.Industries date versioning (`YY.MM.DD.<build-of-day>`); this release was briefly tagged `v0.4.0` (never published, tag removed).
 - New `generated` module: every operation and model in the SunCharts OpenAPI spec (`openapi.json`, API 1.1.0),
   generated with openapi-generator 7.26.0 (`scripts/generate.sh`; CI fails if it is stale). Spec changes arrive
   as automated pull requests.

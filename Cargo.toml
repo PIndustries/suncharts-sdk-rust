@@ -1,6 +1,6 @@
 [package]
 name = "suncharts-sdk"
-version = "0.4.0"
+version = "26.1016.1"
 edition = "2021"
 description = "Official async Rust client for the SunCharts API: OAuth2 client credentials, API keys, white-label auth relay, FHIR chart data"
 license = "MIT OR Apache-2.0"
