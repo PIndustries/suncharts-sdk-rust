@@ -1,0 +1,26 @@
+[package]
+name = "suncharts-sdk"
+version = "0.3.0"
+edition = "2021"
+description = "Official async Rust client for the SunCharts API: OAuth2 client credentials, API keys, white-label auth relay, FHIR chart data"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/PIndustries/suncharts-sdk-rust"
+homepage = "https://api.suncharts.app/docs"
+documentation = "https://docs.rs/suncharts-sdk"
+readme = "README.md"
+keywords = ["suncharts", "ehr", "fhir", "api-client", "oauth2"]
+categories = ["api-bindings", "web-programming::http-client"]
+rust-version = "1.80"
+exclude = ["/.github"]
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "time"] }
+url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+wiremock = "0.6"
