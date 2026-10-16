@@ -1,0 +1,3137 @@
+{
+ "openapi": "3.1.0",
+ "info": {
+  "title": "SunCharts API",
+  "version": "1.1.0",
+  "description": "Build your own backend on SunCharts. Everything you need is here: this reference, a free sandbox and\npublic SDKs. The API is plain HTTPS + JSON, so any language works; the SDKs are optional conveniences.\nMachine-readable spec: [`/openapi.json`](/openapi.json) (also `/api/v1/openapi.yaml`).\n\n# Quickstart\n\n1. **Get sandbox credentials** — open the partner console at\n   [`https://sandbox-api.suncharts.app/partners/`](https://sandbox-api.suncharts.app/partners/), create a sandbox\n   account (email link, no password), then **Create app**. Copy the `client_id` and `client_secret` (shown once).\n2. **Get an access token** (OAuth2 client credentials):\n\n```bash\ncurl -s https://sandbox-api.suncharts.app/oauth/token \\\n  -u \"$CLIENT_ID:$CLIENT_SECRET\" \\\n  -d grant_type=client_credentials -d scope=\"partner.read tenants.read\"\n# {\"access_token\":\"pt_…\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"scope\":\"partner.read tenants.read\"}\n```\n\n3. **Call the API**:\n\n```bash\ncurl -s https://sandbox-api.suncharts.app/api/v1/partner/me -H \"Authorization: Bearer $ACCESS_TOKEN\"\n```\n\n4. **Or use an SDK** (see *SDKs*; Rust shown — PHP, Python and TypeScript work the same way):\n\n```toml\n[dependencies]\nsuncharts-sdk = { git = \"https://github.com/PIndustries/suncharts-sdk-rust\", tag = \"v0.4.0\" }\n```\n\n```rust\nlet client = suncharts_sdk::Client::builder(suncharts_sdk::SANDBOX_BASE_URL)\n    .client_credentials(std::env::var(\"CLIENT_ID\")?, std::env::var(\"CLIENT_SECRET\")?)\n    .build()?;\nlet me = client.partner_me().await?; // token fetched, cached and refreshed for you\n```\n\n# Environments\n\n| Environment | Base URL | Data |\n|---|---|---|\n| Sandbox | `https://sandbox-api.suncharts.app` | Simulated EHR data; reset nightly 03:15 America/Chicago (partner accounts, apps and keys are kept) |\n| Production | `https://api.suncharts.app` | Real clinics |\n\nSandbox and production are separate systems: credentials from one never work on the other. Sandbox keys\nstart with `sk_test_`, production keys with `sk_live_`. Sandbox apps cannot hold `clinical.write`.\n\n**Sandbox test data.** Every sandbox partner gets a tenant `<your-partner-slug>-test` (\"Sandbox Test Clinic\") with passwordless users `test.owner@example.test` (owner) and `test.clinician@example.test` (clinician); it shows up in `GET /api/v1/partner/tenants` and is re-created after the nightly reset. Sandbox apps start with `email_delivery: partner`, so relayed `auth/magic/*`, signup and invite calls return the `delivery` secret instead of sending mail, and passkey ceremonies use your app's `rp_id`/`auth_origin` exactly as in production.\n`sandbox-api.p.industries` and `htpi.p.industries` are legacy aliases; use the hosts above.\n\n# Authentication\n\nTwo ways to authenticate your **server** (never ship either to a browser or mobile app):\n\n## OAuth2 client credentials (recommended)\n\n`POST /oauth/token` per [RFC 6749 §4.4](https://www.rfc-editor.org/rfc/rfc6749#section-4.4). Send client\nauthentication as HTTP Basic (`client_id:client_secret`) **or** as `client_id` / `client_secret` body fields;\nthe body may be `application/x-www-form-urlencoded` or JSON. Optional `scope` narrows the token to a subset of\nyour app's scopes. Tokens (`pt_…`) last **1 hour**; request a new one when `expires_in` runs out (the SDK\ndoes this). Errors follow RFC 6749 §5.2: `invalid_request`, `invalid_client` (401), `unsupported_grant_type`,\n`invalid_scope`. `POST /api/v1/partner/token` remains as a legacy JSON alias.\n\n## API keys\n\nLong-lived keys created in the partner console, optionally with an expiry and a subset of the app's scopes.\nSend as `Authorization: Bearer sk_…` or `X-API-Key: sk_…`.\n\n**Where to send partner credentials.** Every partner endpoint also accepts them as `X-Partner-Authorization: Bearer <token or key>`; it is checked first, so one request can carry your credentials there and an end user's token in `Authorization`. A `401` caused by partner credentials carries `WWW-Authenticate: Bearer realm=\"partner\"` — fetch a new access token and retry once. Prefer OAuth2 for production; use keys where a\ntoken exchange is impractical.\n\n## Scopes\n\n| Scope | Grants |\n|---|---|\n| `partner.read` | Your partner profile, branding and app identity; read auth settings |\n| `tenants.read` / `tenants.write` | List / create your clinics (tenants) |\n| `users.passthrough` | Relay end-user sign-in for your users (see *White-label auth relay*) |\n| `clinical.read` / `clinical.write` | Clinical endpoints (with the end user's token) |\n| `apps.manage` | Change your app's auth settings via the API |\n\n## Rotation and revocation\n\nEverything is self-serve in the partner console (`/partners/` on each environment):\n- **Rotate client secret** — a new secret is issued; the previous one keeps working for a grace window\n  (default 24 h, up to 7 days) so you can roll deploys without downtime.\n- **Rotate API key** — issues a replacement with the same scopes; the old key expires after the grace window.\n- **Revoke** an app or key — takes effect immediately; outstanding access tokens stop working.\n- Every issue, rotation, revocation and denied token request is in the console's audit log.\n\n## End-user tokens\n\nClinical calls run as a clinic user. Your backend signs the user in through the auth endpoints (below) and\nuses the returned user access token (`userBearer`). Refresh with `POST /api/v1/auth/refresh`.\n\n# White-label auth relay\n\nYour backend can call the end-user auth endpoints (`/api/v1/auth/*`, `/api/v1/signup*`,\n`/api/v1/invites/*`, `/api/v1/tenant/invites*`) on behalf of your users so they only ever see your brand.\nIdentify your app on those calls with:\n\n```\nX-Partner-Authorization: Bearer <OAuth access token or API key>   (scope users.passthrough)\nX-End-User-IP: 203.0.113.7                                         (optional; per-user rate limits)\n```\n\nWithout the header, the endpoints behave as for first-party apps. On relayed calls `device_nonce` is optional (secrets are bound to your app) and no CAPTCHA is required. With it, your app's **auth settings** apply:\n\n| Setting | Effect |\n|---|---|\n| `auth_origin` | Your web origin (e.g. `https://app.example.com`): passkey origin and base for links |\n| `rp_id` | Passkey relying-party ID (your domain; must be the origin host or a parent of it) |\n| `android_cert_sha256[]` | Your Android signing-cert fingerprints; accepted as passkey origins (`android:apk-key-hash:…`) |\n| `apple_app_ids[]` | `TEAMID.bundle.id` of your iOS apps (for your associated-domains file) |\n| `email_link_base` | Link target for sign-in emails; `{token}` placeholder, else `#t=<token>` is appended |\n| `email_delivery` | `partner` or `platform` (below) |\n\nSet them in the console or with `PATCH /api/v1/partner/auth-settings`. Passkey registration and sign-in then\nuse your RP ID, origins and brand name.\n\n**Email delivery.** With `partner` delivery we send nothing: `auth/magic/start`, `signup/start`, `signup` and\n`signup/resend` return a `delivery` object (`email`, `token`, `code`, `purpose`, `expires_in_mins`) on your\npartner-authenticated call only, and you deliver it however you like (`delivery` is `null` when there is\nnothing to send, e.g. an unknown email on sign-in). With `platform` delivery we send the email under your brand\nand from-address with links on your origin — available once your custom domain is verified; until then those\ncalls return `409 partner_delivery_required`. Clinic invites for your tenants link to your `auth_origin`.\n\n# Implementing a client (any language)\n\nThe contract is the HTTP described here; nothing depends on an SDK. A conforming client:\n\n- **Transport** — HTTPS only, TLS 1.2+. Request and response bodies are UTF-8 JSON\n  (`Content-Type: application/json`) except `POST /oauth/token`, which also takes\n  `application/x-www-form-urlencoded`. Send a descriptive `User-Agent` (e.g. `acme-backend/1.4 php/8.3`).\n- **Data types** — timestamps are RFC 3339 in UTC (`2026-10-16T16:00:00Z`); dates are `YYYY-MM-DD`;\n  IDs are opaque strings (don't parse them, don't assume UUIDs or length). Absent and `null` mean the same.\n  **Ignore unknown fields and enum values** you don't recognise: v1 grows additively.\n- **Token handling** — cache the `access_token` per (client_id, scope) and reuse it until about 60 s before\n  `expires_in` elapses; then request a new one (there are no refresh tokens for client credentials). On a\n  `401` from an API call, fetch a fresh token **once** and retry; if it fails again, surface the error.\n  Never log `client_secret`, access tokens or API keys.\n- **Errors** — branch on HTTP status and the `error` code (see *Errors*), never on `message`. On `409`,\n  sub-codes are the text before the first `:` in `message` (e.g. `partner_delivery_required`).\n- **Retries** — retry `429` after `Retry-After` seconds, and `502/503/504` and network errors on idempotent\n  requests (`GET`, `PUT`, `DELETE`) with exponential backoff and jitter (e.g. 0.5 s, 1 s, 2 s; max 3 tries).\n  Don't blindly retry `POST` auth calls (they may send an email).\n- **Relay** — on end-user auth calls made for your users, add `X-Partner-Authorization: Bearer <token or key>`\n  and `X-End-User-IP`. Pass the end user's own `Authorization` header (if any) through unchanged.\n- **Timeouts** — 10 s connect, 30 s total is a good default; FHIR calls proxy to the clinic's EHR and can be\n  slower.\n\n### Minimal flow with plain HTTP\n\n```bash\nTOKEN=$(curl -s https://sandbox-api.suncharts.app/oauth/token -u \"$CLIENT_ID:$CLIENT_SECRET\" \\\n  -d grant_type=client_credentials | jq -r .access_token)\ncurl -s https://sandbox-api.suncharts.app/api/v1/partner/tenants -H \"Authorization: Bearer $TOKEN\"\n# relayed sign-in for one of your users, with partner delivery:\ncurl -s https://sandbox-api.suncharts.app/api/v1/auth/magic/start \\\n  -H \"X-Partner-Authorization: Bearer $TOKEN\" -H \"X-End-User-IP: 203.0.113.7\" \\\n  -H 'Content-Type: application/json' -d '{\"email\":\"dr.lee@example.com\"}'\n# {\"status\":\"sent\",\"message\":\"…\",\"resend_after\":60,\"expires_in\":600,\"code_length\":6,\n#  \"delivery\":{\"email\":\"dr.lee@example.com\",\"token\":\"…\",\"code\":\"123456\",\"purpose\":\"signin\",\"expires_in_mins\":10}}\n```\n\n# Errors\n\nErrors are JSON with a stable, brand-neutral code:\n\n```json\n{\"error\": \"bad_request\", \"message\": \"human-readable detail\"}\n```\n\n| HTTP | `error` | Meaning |\n|---|---|---|\n| 400 | `bad_request` | Invalid input |\n| 401 | `unauthorized` | Missing, expired or revoked credentials (`invalid_client` on `/oauth/token`) |\n| 403 | `forbidden` | Credential lacks the scope / access |\n| 404 | `not_found` | No such resource (or not yours) |\n| 409 | `conflict` | State conflict (`message` starts with a sub-code such as `partner_delivery_required`) |\n| 428 | `openemr_link_required` / `openemr_relink_required` | The user must (re)link their EHR account |\n| 429 | `rate_limited` | Slow down; honour `Retry-After` |\n| 424 | `upstream_error` | The clinic's EHR failed or timed out; retry idempotent calls with backoff |\n| 5xx | `internal` | Our side; retry with backoff |\n\nCodes are only ever added within v1.\n\n# Rate limits\n\n- Per app: `rate_limit_per_min` (default **600/min**) shared by its tokens and keys.\n- Token endpoint: 30 requests/min per source IP.\n- Auth endpoints: per end user (send `X-End-User-IP` when relaying) and per email.\n- Exceeding a limit returns `429` with `Retry-After` (seconds). Back off and retry.\n\n# Versioning\n\n- The major version is in the path (`/api/v1`). Within v1 changes are **additive only**: new endpoints,\n  new optional request fields, new response fields, new error codes. Ignore unknown fields.\n- Breaking changes ship as `/api/v2` with at least **6 months** of overlap. Deprecated operations are marked\n  `deprecated` here and answer with `Deprecation` and `Sunset` headers before removal.\n- The SDKs follow SemVer independently of the API version; minor versions add features, patch versions fix bugs.\n\n# SDKs\n\nOfficial SDKs are generated from this spec ([`/openapi.json`](/openapi.json)) on every API change, plus a thin\nhand-written layer for OAuth2 token caching/refresh, API keys, the relay header, retries and pagination.\n\n| Language | Repository | Install | License |\n|---|---|---|---|\n| PHP 8.2+ | [`PIndustries/suncharts-sdk-php`](https://github.com/PIndustries/suncharts-sdk-php) | `composer require pindustries/suncharts-sdk-php` (VCS repo until published) | MIT |\n| Rust | [`PIndustries/suncharts-sdk-rust`](https://github.com/PIndustries/suncharts-sdk-rust) | `suncharts-sdk = { git = \"https://github.com/PIndustries/suncharts-sdk-rust\", tag = \"v0.4.0\" }` | MIT OR Apache-2.0 |\n| Python 3.9+ | [`PIndustries/suncharts-sdk-python`](https://github.com/PIndustries/suncharts-sdk-python) | `pip install \"git+https://github.com/PIndustries/suncharts-sdk-python@v0.1.0\"` | MIT |\n| TypeScript / Node 18+ | [`PIndustries/suncharts-sdk-typescript`](https://github.com/PIndustries/suncharts-sdk-typescript) | `npm install github:PIndustries/suncharts-sdk-typescript#v0.1.0` | MIT |\n\nAny other language — generate a client from [`/openapi.json`](/openapi.json).",
+  "contact": {
+   "name": "SunCharts developer support",
+   "url": "https://api.suncharts.app/docs"
+  }
+ },
+ "servers": [
+  {
+   "url": "https://sandbox-api.suncharts.app",
+   "description": "Sandbox (simulated data)"
+  },
+  {
+   "url": "https://api.suncharts.app",
+   "description": "Production"
+  }
+ ],
+ "tags": [
+  {
+   "name": "oauth",
+   "description": "Partner app authentication"
+  },
+  {
+   "name": "partner"
+  },
+  {
+   "name": "auth"
+  },
+  {
+   "name": "connections"
+  },
+  {
+   "name": "patients"
+  },
+  {
+   "name": "appointments"
+  },
+  {
+   "name": "encounters"
+  },
+  {
+   "name": "notes"
+  },
+  {
+   "name": "vitals"
+  },
+  {
+   "name": "problems"
+  },
+  {
+   "name": "allergies"
+  },
+  {
+   "name": "medications"
+  },
+  {
+   "name": "documents"
+  },
+  {
+   "name": "messages"
+  },
+  {
+   "name": "directories"
+  },
+  {
+   "name": "meta",
+   "description": "Service status"
+  }
+ ],
+ "paths": {
+  "/oauth/token": {
+   "post": {
+    "tags": [
+     "oauth"
+    ],
+    "operationId": "oauthToken",
+    "summary": "OAuth2 client-credentials token",
+    "description": "RFC 6749 §4.4. Client auth via HTTP Basic or body fields. Response has `Cache-Control: no-store`.",
+    "security": [
+     {
+      "basicClient": []
+     },
+     {}
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/x-www-form-urlencoded": {
+       "schema": {
+        "$ref": "#/components/schemas/OAuthTokenRequest"
+       }
+      },
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/OAuthTokenRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Access token",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/PartnerToken"
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "RFC 6749 error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/OAuthError"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "invalid_client",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/OAuthError"
+        }
+       }
+      }
+     },
+     "429": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "x-codeSamples": [
+     {
+      "lang": "Shell",
+      "label": "curl",
+      "source": "curl -s https://sandbox-api.suncharts.app/oauth/token -u \"$CLIENT_ID:$CLIENT_SECRET\" \\\n  -d grant_type=client_credentials -d scope=\"partner.read tenants.read\""
+     }
+    ]
+   }
+  },
+  "/api/v1/partner/token": {
+   "post": {
+    "tags": [
+     "oauth"
+    ],
+    "operationId": "partnerToken",
+    "summary": "Client-credentials token (legacy JSON alias of /oauth/token)",
+    "security": [],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/ClientCredentialsRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Token",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/PartnerToken"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "deprecated": false
+   }
+  },
+  "/api/v1/partner/me": {
+   "get": {
+    "tags": [
+     "partner"
+    ],
+    "operationId": "partnerMe",
+    "summary": "Partner, branding and app identity (scope partner.read)",
+    "security": [
+     {
+      "oauth2": [
+       "partner.read"
+      ]
+     },
+     {
+      "apiKey": []
+     },
+     {
+      "partnerBearer": [
+       "partner.read"
+      ]
+     },
+     {
+      "partnerHeader": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/PartnerMe"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "x-codeSamples": [
+     {
+      "lang": "Shell",
+      "label": "curl",
+      "source": "curl -s https://sandbox-api.suncharts.app/api/v1/partner/me -H \"Authorization: Bearer $TOKEN\""
+     }
+    ]
+   }
+  },
+  "/api/v1/partner/tenants": {
+   "get": {
+    "tags": [
+     "partner"
+    ],
+    "operationId": "partnerListTenants",
+    "summary": "Partner-scoped tenants (clinics)",
+    "security": [
+     {
+      "oauth2": [
+       "tenants.read"
+      ]
+     },
+     {
+      "apiKey": []
+     },
+     {
+      "partnerBearer": [
+       "tenants.read"
+      ]
+     },
+     {
+      "partnerHeader": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/TenantPage"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "x-codeSamples": [
+     {
+      "lang": "Shell",
+      "label": "curl",
+      "source": "curl -s https://sandbox-api.suncharts.app/api/v1/partner/tenants -H \"Authorization: Bearer $TOKEN\""
+     }
+    ]
+   },
+   "post": {
+    "tags": [
+     "partner"
+    ],
+    "operationId": "partnerCreateTenant",
+    "summary": "Create a partner-scoped tenant",
+    "security": [
+     {
+      "oauth2": [
+       "tenants.write"
+      ]
+     },
+     {
+      "apiKey": []
+     },
+     {
+      "partnerBearer": [
+       "tenants.write"
+      ]
+     },
+     {
+      "partnerHeader": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/NewTenant"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Created",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Tenant"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/auth/login": {
+   "post": {
+    "tags": [
+     "auth"
+    ],
+    "operationId": "login",
+    "summary": "End-user sign-in (passthrough from the partner backend)",
+    "security": [],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/LoginRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Session, or a clinic selection when the email belongs to several clinics",
+      "content": {
+       "application/json": {
+        "schema": {
+         "oneOf": [
+          {
+           "$ref": "#/components/schemas/UserTokens"
+          },
+          {
+           "$ref": "#/components/schemas/ClinicSelection"
+          }
+         ]
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Error"
+     },
+     "429": {
+      "$ref": "#/components/responses/Error"
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "description": "Legacy password sign-in (may be disabled on a deployment). Prefer passkeys or email magic links.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/PartnerAuthorization"
+     },
+     {
+      "$ref": "#/components/parameters/EndUserIp"
+     }
+    ]
+   }
+  },
+  "/api/v1/auth/refresh": {
+   "post": {
+    "tags": [
+     "auth"
+    ],
+    "operationId": "refresh",
+    "summary": "Rotate the refresh token",
+    "security": [],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/RefreshRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Session",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/UserTokens"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/auth/logout": {
+   "post": {
+    "tags": [
+     "auth"
+    ],
+    "operationId": "logout",
+    "summary": "Revoke the current session",
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/me": {
+   "get": {
+    "tags": [
+     "auth"
+    ],
+    "operationId": "me",
+    "summary": "Current user, tenant, role",
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Me"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/connections": {
+   "get": {
+    "tags": [
+     "connections"
+    ],
+    "operationId": "listConnections",
+    "summary": "EHR (OpenEMR) connections visible to the user",
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/today": {
+   "get": {
+    "tags": [
+     "appointments"
+    ],
+    "operationId": "today",
+    "summary": "Today's schedule, KPIs, now/next",
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "connection",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     },
+     {
+      "name": "date",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "format": "date"
+      }
+     },
+     {
+      "name": "tz",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "scope",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "enum": [
+        "mine",
+        "all"
+       ]
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Today"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/schedule/grid": {
+   "get": {
+    "tags": [
+     "appointments"
+    ],
+    "operationId": "scheduleGrid",
+    "summary": "Schedule grid by provider/room",
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "connection",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     },
+     {
+      "name": "date",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "format": "date"
+      }
+     },
+     {
+      "name": "slot_minutes",
+      "in": "query",
+      "schema": {
+       "type": "integer"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/inbox": {
+   "get": {
+    "tags": [
+     "messages"
+    ],
+    "operationId": "inbox",
+    "summary": "Messages / tasks inbox",
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/patients/{puuid}/alerts": {
+   "get": {
+    "tags": [
+     "patients"
+    ],
+    "operationId": "patientAlerts",
+    "summary": "Chart alerts banner",
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "puuid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/connections/{connection_id}/fhir/Patient": {
+   "get": {
+    "tags": [
+     "patients"
+    ],
+    "summary": "Search patients",
+    "operationId": "fhirPatientSearch",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/ConnectionId"
+     },
+     {
+      "$ref": "#/components/parameters/Patient"
+     },
+     {
+      "$ref": "#/components/parameters/Count"
+     },
+     {
+      "$ref": "#/components/parameters/PageToken"
+     }
+    ],
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "FHIR R4 Bundle",
+      "content": {
+       "application/fhir+json": {
+        "schema": {
+         "$ref": "#/components/schemas/FhirBundle"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/connections/{connection_id}/fhir/Patient/{id}": {
+   "get": {
+    "tags": [
+     "patients"
+    ],
+    "summary": "Read a patient (chart header)",
+    "operationId": "fhirPatientRead",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/ConnectionId"
+     },
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "FHIR R4 Bundle",
+      "content": {
+       "application/fhir+json": {
+        "schema": {
+         "$ref": "#/components/schemas/FhirBundle"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/connections/{connection_id}/fhir/Appointment": {
+   "get": {
+    "tags": [
+     "appointments"
+    ],
+    "summary": "Appointments",
+    "operationId": "fhirAppointmentSearch",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/ConnectionId"
+     },
+     {
+      "$ref": "#/components/parameters/Patient"
+     },
+     {
+      "$ref": "#/components/parameters/Count"
+     },
+     {
+      "$ref": "#/components/parameters/PageToken"
+     }
+    ],
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "FHIR R4 Bundle",
+      "content": {
+       "application/fhir+json": {
+        "schema": {
+         "$ref": "#/components/schemas/FhirBundle"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/connections/{connection_id}/fhir/Encounter": {
+   "get": {
+    "tags": [
+     "encounters"
+    ],
+    "summary": "Encounters",
+    "operationId": "fhirEncounterSearch",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/ConnectionId"
+     },
+     {
+      "$ref": "#/components/parameters/Patient"
+     },
+     {
+      "$ref": "#/components/parameters/Count"
+     },
+     {
+      "$ref": "#/components/parameters/PageToken"
+     }
+    ],
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "FHIR R4 Bundle",
+      "content": {
+       "application/fhir+json": {
+        "schema": {
+         "$ref": "#/components/schemas/FhirBundle"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/connections/{connection_id}/fhir/DocumentReference": {
+   "get": {
+    "tags": [
+     "notes"
+    ],
+    "summary": "Clinical notes & documents",
+    "operationId": "fhirDocumentReferenceSearch",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/ConnectionId"
+     },
+     {
+      "$ref": "#/components/parameters/Patient"
+     },
+     {
+      "$ref": "#/components/parameters/Count"
+     },
+     {
+      "$ref": "#/components/parameters/PageToken"
+     }
+    ],
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "FHIR R4 Bundle",
+      "content": {
+       "application/fhir+json": {
+        "schema": {
+         "$ref": "#/components/schemas/FhirBundle"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "post": {
+    "tags": [
+     "notes"
+    ],
+    "summary": "Create DocumentReference",
+    "operationId": "fhirDocumentReferenceCreate",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/ConnectionId"
+     }
+    ],
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/fhir+json": {
+       "schema": {
+        "type": "object"
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "Created",
+      "content": {
+       "application/fhir+json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/connections/{connection_id}/fhir/Observation": {
+   "get": {
+    "tags": [
+     "vitals"
+    ],
+    "summary": "Vitals/labs (use category=vital-signs)",
+    "operationId": "fhirObservationSearch",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/ConnectionId"
+     },
+     {
+      "$ref": "#/components/parameters/Patient"
+     },
+     {
+      "$ref": "#/components/parameters/Count"
+     },
+     {
+      "$ref": "#/components/parameters/PageToken"
+     }
+    ],
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "FHIR R4 Bundle",
+      "content": {
+       "application/fhir+json": {
+        "schema": {
+         "$ref": "#/components/schemas/FhirBundle"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "post": {
+    "tags": [
+     "vitals"
+    ],
+    "summary": "Create Observation",
+    "operationId": "fhirObservationCreate",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/ConnectionId"
+     }
+    ],
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/fhir+json": {
+       "schema": {
+        "type": "object"
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "Created",
+      "content": {
+       "application/fhir+json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/connections/{connection_id}/fhir/Condition": {
+   "get": {
+    "tags": [
+     "problems"
+    ],
+    "summary": "Problem list",
+    "operationId": "fhirConditionSearch",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/ConnectionId"
+     },
+     {
+      "$ref": "#/components/parameters/Patient"
+     },
+     {
+      "$ref": "#/components/parameters/Count"
+     },
+     {
+      "$ref": "#/components/parameters/PageToken"
+     }
+    ],
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "FHIR R4 Bundle",
+      "content": {
+       "application/fhir+json": {
+        "schema": {
+         "$ref": "#/components/schemas/FhirBundle"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "post": {
+    "tags": [
+     "problems"
+    ],
+    "summary": "Create Condition",
+    "operationId": "fhirConditionCreate",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/ConnectionId"
+     }
+    ],
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/fhir+json": {
+       "schema": {
+        "type": "object"
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "Created",
+      "content": {
+       "application/fhir+json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/connections/{connection_id}/fhir/AllergyIntolerance": {
+   "get": {
+    "tags": [
+     "allergies"
+    ],
+    "summary": "Allergies",
+    "operationId": "fhirAllergyIntoleranceSearch",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/ConnectionId"
+     },
+     {
+      "$ref": "#/components/parameters/Patient"
+     },
+     {
+      "$ref": "#/components/parameters/Count"
+     },
+     {
+      "$ref": "#/components/parameters/PageToken"
+     }
+    ],
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "FHIR R4 Bundle",
+      "content": {
+       "application/fhir+json": {
+        "schema": {
+         "$ref": "#/components/schemas/FhirBundle"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "post": {
+    "tags": [
+     "allergies"
+    ],
+    "summary": "Create AllergyIntolerance",
+    "operationId": "fhirAllergyIntoleranceCreate",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/ConnectionId"
+     }
+    ],
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/fhir+json": {
+       "schema": {
+        "type": "object"
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "Created",
+      "content": {
+       "application/fhir+json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/connections/{connection_id}/fhir/MedicationRequest": {
+   "get": {
+    "tags": [
+     "medications"
+    ],
+    "summary": "Medications",
+    "operationId": "fhirMedicationRequestSearch",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/ConnectionId"
+     },
+     {
+      "$ref": "#/components/parameters/Patient"
+     },
+     {
+      "$ref": "#/components/parameters/Count"
+     },
+     {
+      "$ref": "#/components/parameters/PageToken"
+     }
+    ],
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "FHIR R4 Bundle",
+      "content": {
+       "application/fhir+json": {
+        "schema": {
+         "$ref": "#/components/schemas/FhirBundle"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/connections/{connection_id}/fhir/Binary/{id}": {
+   "get": {
+    "tags": [
+     "documents"
+    ],
+    "summary": "Document content",
+    "operationId": "fhirBinaryRead",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/ConnectionId"
+     },
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "FHIR R4 Bundle",
+      "content": {
+       "application/fhir+json": {
+        "schema": {
+         "$ref": "#/components/schemas/FhirBundle"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/connections/{connection_id}/fhir/Communication": {
+   "get": {
+    "tags": [
+     "messages"
+    ],
+    "summary": "Patient messages",
+    "operationId": "fhirCommunicationSearch",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/ConnectionId"
+     },
+     {
+      "$ref": "#/components/parameters/Patient"
+     },
+     {
+      "$ref": "#/components/parameters/Count"
+     },
+     {
+      "$ref": "#/components/parameters/PageToken"
+     }
+    ],
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "FHIR R4 Bundle",
+      "content": {
+       "application/fhir+json": {
+        "schema": {
+         "$ref": "#/components/schemas/FhirBundle"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/connections/{connection_id}/fhir/Practitioner": {
+   "get": {
+    "tags": [
+     "directories"
+    ],
+    "summary": "Provider directory",
+    "operationId": "fhirPractitionerSearch",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/ConnectionId"
+     },
+     {
+      "$ref": "#/components/parameters/Patient"
+     },
+     {
+      "$ref": "#/components/parameters/Count"
+     },
+     {
+      "$ref": "#/components/parameters/PageToken"
+     }
+    ],
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "FHIR R4 Bundle",
+      "content": {
+       "application/fhir+json": {
+        "schema": {
+         "$ref": "#/components/schemas/FhirBundle"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/connections/{connection_id}/fhir/Organization": {
+   "get": {
+    "tags": [
+     "directories"
+    ],
+    "summary": "Facility/organization directory",
+    "operationId": "fhirOrganizationSearch",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/ConnectionId"
+     },
+     {
+      "$ref": "#/components/parameters/Patient"
+     },
+     {
+      "$ref": "#/components/parameters/Count"
+     },
+     {
+      "$ref": "#/components/parameters/PageToken"
+     }
+    ],
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "FHIR R4 Bundle",
+      "content": {
+       "application/fhir+json": {
+        "schema": {
+         "$ref": "#/components/schemas/FhirBundle"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/connections/{connection_id}/fhir/Location": {
+   "get": {
+    "tags": [
+     "directories"
+    ],
+    "summary": "Locations",
+    "operationId": "fhirLocationSearch",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/ConnectionId"
+     },
+     {
+      "$ref": "#/components/parameters/Patient"
+     },
+     {
+      "$ref": "#/components/parameters/Count"
+     },
+     {
+      "$ref": "#/components/parameters/PageToken"
+     }
+    ],
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "FHIR R4 Bundle",
+      "content": {
+       "application/fhir+json": {
+        "schema": {
+         "$ref": "#/components/schemas/FhirBundle"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/auth/login/select": {
+   "post": {
+    "tags": [
+     "auth"
+    ],
+    "operationId": "loginSelectClinic",
+    "summary": "Finish a multi-clinic sign-in",
+    "security": [],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/SelectClinicRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Session, or a clinic selection when the email belongs to several clinics",
+      "content": {
+       "application/json": {
+        "schema": {
+         "oneOf": [
+          {
+           "$ref": "#/components/schemas/UserTokens"
+          },
+          {
+           "$ref": "#/components/schemas/ClinicSelection"
+          }
+         ]
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Error"
+     },
+     "429": {
+      "$ref": "#/components/responses/Error"
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/api/v1/auth/magic/start": {
+   "post": {
+    "tags": [
+     "auth"
+    ],
+    "operationId": "magicLinkStart",
+    "summary": "Email a single-use sign-in link + 6-digit code",
+    "security": [],
+    "description": "Enumeration-safe: identical response whether or not the email has an account. 60 s resend cooldown.",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/MagicStartRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "202": {
+      "description": "Always the same generic answer",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/MagicSent"
+        }
+       }
+      }
+     },
+     "429": {
+      "$ref": "#/components/responses/Error"
+     },
+     "409": {
+      "description": "partner_delivery_required (relay, platform delivery without a verified custom domain)",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/PartnerAuthorization"
+     },
+     {
+      "$ref": "#/components/parameters/EndUserIp"
+     }
+    ],
+    "x-codeSamples": [
+     {
+      "lang": "Shell",
+      "label": "curl",
+      "source": "curl -s https://sandbox-api.suncharts.app/api/v1/auth/magic/start \\\n  -H \"X-Partner-Authorization: Bearer $TOKEN\" -H \"X-End-User-IP: 203.0.113.7\" \\\n  -H \"Content-Type: application/json\" -d '{\"email\":\"dr.lee@example.com\"}'"
+     }
+    ]
+   }
+  },
+  "/api/v1/auth/magic/verify": {
+   "post": {
+    "tags": [
+     "auth"
+    ],
+    "operationId": "magicLinkVerify",
+    "summary": "Redeem a magic link or code (same device only)",
+    "security": [],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/MagicVerifyRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Session, or a clinic selection when the email belongs to several clinics",
+      "content": {
+       "application/json": {
+        "schema": {
+         "oneOf": [
+          {
+           "$ref": "#/components/schemas/UserTokens"
+          },
+          {
+           "$ref": "#/components/schemas/ClinicSelection"
+          }
+         ]
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Error"
+     },
+     "429": {
+      "$ref": "#/components/responses/Error"
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/PartnerAuthorization"
+     },
+     {
+      "$ref": "#/components/parameters/EndUserIp"
+     }
+    ]
+   }
+  },
+  "/api/v1/partner/auth-settings": {
+   "get": {
+    "tags": [
+     "partner"
+    ],
+    "operationId": "getAuthSettings",
+    "summary": "Your app's white-label auth settings",
+    "security": [
+     {
+      "oauth2": [
+       "partner.read"
+      ]
+     },
+     {
+      "apiKey": []
+     },
+     {
+      "partnerBearer": [
+       "partner.read"
+      ]
+     },
+     {
+      "partnerHeader": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/AuthSettings"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "x-codeSamples": [
+     {
+      "lang": "Shell",
+      "label": "curl",
+      "source": "curl -s https://sandbox-api.suncharts.app/api/v1/partner/auth-settings -H \"Authorization: Bearer $TOKEN\""
+     }
+    ]
+   },
+   "patch": {
+    "tags": [
+     "partner"
+    ],
+    "operationId": "updateAuthSettings",
+    "summary": "Update your app's auth settings (omitted = unchanged, \"\"/[] = clear)",
+    "security": [
+     {
+      "oauth2": [
+       "apps.manage"
+      ]
+     },
+     {
+      "apiKey": []
+     },
+     {
+      "partnerBearer": [
+       "apps.manage"
+      ]
+     },
+     {
+      "oauth2": [
+       "users.passthrough"
+      ]
+     },
+     {
+      "partnerHeader": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/AuthSettings"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Updated",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/AuthSettings"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "x-codeSamples": [
+     {
+      "lang": "Shell",
+      "label": "curl",
+      "source": "curl -s -X PATCH https://sandbox-api.suncharts.app/api/v1/partner/auth-settings \\\n  -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" \\\n  -d '{\"auth_origin\":\"https://app.example.com\",\"rp_id\":\"example.com\",\"email_delivery\":\"partner\"}'"
+     }
+    ]
+   }
+  },
+  "/api/v1/signup/start": {
+   "post": {
+    "tags": [
+     "auth"
+    ],
+    "operationId": "signupStart",
+    "summary": "Passwordless sign-up: email + clinic name → link/code",
+    "security": [],
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/PartnerAuthorization"
+     },
+     {
+      "$ref": "#/components/parameters/EndUserIp"
+     }
+    ],
+    "responses": {
+     "202": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/MagicSent"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "description": "Body: `email`, `clinic_name`, `accept_terms`, `terms_version`, `device_nonce`, optional `display_name`. Relay + partner delivery returns `delivery`.",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object"
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/auth/passkey/login/start": {
+   "post": {
+    "tags": [
+     "auth"
+    ],
+    "operationId": "passkeyLoginStart",
+    "summary": "Begin passkey sign-in (WebAuthn options)",
+    "security": [],
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/PartnerAuthorization"
+     },
+     {
+      "$ref": "#/components/parameters/EndUserIp"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "description": "Returns `ceremony_id` and `options` (publicKey request). Relay: partner RP ID/origins.",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object"
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/auth/passkey/login/finish": {
+   "post": {
+    "tags": [
+     "auth"
+    ],
+    "operationId": "passkeyLoginFinish",
+    "summary": "Finish passkey sign-in → user tokens",
+    "security": [],
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/PartnerAuthorization"
+     },
+     {
+      "$ref": "#/components/parameters/EndUserIp"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/UserTokens"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "description": "Body: `ceremony_id`, `credential` (PublicKeyCredential JSON), optional `tenant_id`, `device_name`.",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object"
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/auth/passkey/register/start": {
+   "post": {
+    "tags": [
+     "auth"
+    ],
+    "operationId": "passkeyRegisterStart",
+    "summary": "Begin passkey registration (user token required)",
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/PartnerAuthorization"
+     },
+     {
+      "$ref": "#/components/parameters/EndUserIp"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object"
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/auth/passkey/register/finish": {
+   "post": {
+    "tags": [
+     "auth"
+    ],
+    "operationId": "passkeyRegisterFinish",
+    "summary": "Finish passkey registration",
+    "security": [
+     {
+      "userBearer": []
+     }
+    ],
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/PartnerAuthorization"
+     },
+     {
+      "$ref": "#/components/parameters/EndUserIp"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object"
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/partner/tenants/{tid}/users": {
+   "get": {
+    "tags": [
+     "partner"
+    ],
+    "operationId": "partnerListTenantUsers",
+    "summary": "Users of one of your tenants",
+    "parameters": [
+     {
+      "name": "tid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ],
+    "security": [
+     {
+      "oauth2": [
+       "tenants.read"
+      ]
+     },
+     {
+      "apiKey": []
+     },
+     {
+      "partnerBearer": [
+       "tenants.read"
+      ]
+     },
+     {
+      "partnerHeader": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/TenantUsers"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "x-codeSamples": [
+     {
+      "lang": "Shell",
+      "label": "curl",
+      "source": "curl -s https://sandbox-api.suncharts.app/api/v1/partner/tenants/$TENANT_ID/users -H \"X-Partner-Authorization: Bearer $TOKEN\""
+     }
+    ]
+   }
+  },
+  "/api/v1/partner/tenants/{tid}/invites": {
+   "post": {
+    "tags": [
+     "partner"
+    ],
+    "operationId": "partnerInviteUser",
+    "summary": "Invite a user to one of your tenants",
+    "description": "Replaces any outstanding invite for the same email. `409` if the email already has an account in the tenant. Delivery follows your app's `email_delivery` (see *White-label auth relay*).",
+    "parameters": [
+     {
+      "name": "tid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ],
+    "security": [
+     {
+      "oauth2": [
+       "tenants.write"
+      ]
+     },
+     {
+      "apiKey": []
+     },
+     {
+      "partnerBearer": [
+       "tenants.write"
+      ]
+     },
+     {
+      "partnerHeader": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/NewInvite"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Invite"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "x-codeSamples": [
+     {
+      "lang": "Shell",
+      "label": "curl",
+      "source": "curl -s https://sandbox-api.suncharts.app/api/v1/partner/tenants/$TENANT_ID/invites \\\n  -H \"X-Partner-Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" \\\n  -d '{\"email\":\"dr.lee@example.com\",\"role\":\"clinician\"}'"
+     }
+    ]
+   }
+  },
+  "/api/v1/partner/tenants/{tid}/users/{uid}/deactivate": {
+   "post": {
+    "tags": [
+     "partner"
+    ],
+    "operationId": "partnerDeactivateUser",
+    "summary": "Deactivate a tenant user",
+    "description": "Signs the user out everywhere and drops their EHR links. Idempotent. `409` if it would leave the tenant without an active owner.",
+    "parameters": [
+     {
+      "name": "tid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     },
+     {
+      "name": "uid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ],
+    "security": [
+     {
+      "oauth2": [
+       "tenants.write"
+      ]
+     },
+     {
+      "apiKey": []
+     },
+     {
+      "partnerBearer": [
+       "tenants.write"
+      ]
+     },
+     {
+      "partnerHeader": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "string"
+          },
+          "role": {
+           "type": "string"
+          },
+          "status": {
+           "type": "string",
+           "const": "deactivated"
+          }
+         }
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/health": {
+   "get": {
+    "operationId": "health",
+    "tags": [
+     "meta"
+    ],
+    "summary": "Liveness check",
+    "security": [],
+    "responses": {
+     "200": {
+      "description": "Service is up",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HealthStatus"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ "components": {
+  "securitySchemes": {
+   "partnerBearer": {
+    "type": "http",
+    "scheme": "bearer",
+    "description": "pt_… access token from POST /oauth/token, or an sk_… API key"
+   },
+   "userBearer": {
+    "type": "http",
+    "scheme": "bearer",
+    "bearerFormat": "JWT",
+    "description": "End-user access token from /api/v1/auth/login"
+   },
+   "oauth2": {
+    "type": "oauth2",
+    "description": "Client credentials. Sandbox token URL: https://sandbox-api.suncharts.app/oauth/token",
+    "flows": {
+     "clientCredentials": {
+      "tokenUrl": "https://api.suncharts.app/oauth/token",
+      "scopes": {
+       "partner.read": "Partner profile, branding, app identity, auth settings (read)",
+       "tenants.read": "List your clinics",
+       "tenants.write": "Create clinics",
+       "users.passthrough": "Relay end-user auth for your users",
+       "clinical.read": "Clinical reads (with a user token)",
+       "clinical.write": "Clinical writes (production only)",
+       "apps.manage": "Change your app's auth settings"
+      }
+     }
+    }
+   },
+   "apiKey": {
+    "type": "apiKey",
+    "in": "header",
+    "name": "X-API-Key",
+    "description": "Partner API key (sk_live_… / sk_test_…). Also accepted as Authorization: Bearer sk_…"
+   },
+   "basicClient": {
+    "type": "http",
+    "scheme": "basic",
+    "description": "client_id:client_secret"
+   },
+   "partnerHeader": {
+    "type": "apiKey",
+    "in": "header",
+    "name": "X-Partner-Authorization",
+    "description": "`Bearer <pt_… access token | sk_… API key>`. Accepted on every partner endpoint and preferred when your request also carries an end user's `Authorization`. Checked before `Authorization` and `X-API-Key`."
+   }
+  },
+  "parameters": {
+   "ConnectionId": {
+    "name": "connection_id",
+    "in": "path",
+    "required": true,
+    "schema": {
+     "type": "string",
+     "format": "uuid"
+    }
+   },
+   "Patient": {
+    "name": "patient",
+    "in": "query",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "Count": {
+    "name": "_count",
+    "in": "query",
+    "schema": {
+     "type": "integer",
+     "maximum": 200
+    }
+   },
+   "PageToken": {
+    "name": "_page_token",
+    "in": "query",
+    "description": "Opaque cursor taken from Bundle.link[relation=next]",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "PartnerAuthorization": {
+    "name": "X-Partner-Authorization",
+    "in": "header",
+    "required": false,
+    "description": "White-label relay: `Bearer <pt_… token | sk_… key>` of the partner app (scope users.passthrough). Applies the app's auth settings.",
+    "schema": {
+     "type": "string",
+     "example": "Bearer pt_…"
+    }
+   },
+   "EndUserIp": {
+    "name": "X-End-User-IP",
+    "in": "header",
+    "required": false,
+    "description": "Relay only: the end user's IP for rate limiting.",
+    "schema": {
+     "type": "string",
+     "example": "203.0.113.7"
+    }
+   }
+  },
+  "responses": {
+   "Error": {
+    "description": "Error (neutral code)",
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Error"
+      }
+     }
+    }
+   }
+  },
+  "schemas": {
+   "Error": {
+    "type": "object",
+    "required": [
+     "error"
+    ],
+    "properties": {
+     "error": {
+      "type": "string",
+      "description": "Stable machine code. Known values: `unauthorized`, `forbidden`, `not_found`, `bad_request`, `conflict`, `rate_limited`, `mfa_required`, `mfa_invalid`, `mfa_enrollment_required`, `openemr_link_required`, `openemr_relink_required`, `upstream_error`, `internal`. New codes may be added within v1: treat unknown values like the HTTP status.",
+      "example": "bad_request"
+     },
+     "message": {
+      "type": "string",
+      "description": "Human-readable detail (do not branch on it; on 409 the text before the first `:` is a sub-code)"
+     },
+     "retry_after": {
+      "type": "integer",
+      "description": "Seconds to wait (on `rate_limited`; also sent as `Retry-After`)"
+     },
+     "connection_id": {
+      "type": "string",
+      "description": "EHR connection that needs (re)linking (on `openemr_link_required` / `openemr_relink_required`)"
+     },
+     "link": {
+      "type": "string",
+      "description": "How to link the connection (on `openemr_link_required` / `openemr_relink_required`)"
+     }
+    }
+   },
+   "ClientCredentialsRequest": {
+    "type": "object",
+    "properties": {
+     "grant_type": {
+      "const": "client_credentials"
+     },
+     "client_id": {
+      "type": "string"
+     },
+     "client_secret": {
+      "type": "string"
+     },
+     "scope": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "grant_type",
+     "client_id",
+     "client_secret"
+    ]
+   },
+   "PartnerToken": {
+    "type": "object",
+    "properties": {
+     "access_token": {
+      "type": "string"
+     },
+     "token_type": {
+      "const": "Bearer"
+     },
+     "expires_in": {
+      "type": "integer"
+     },
+     "scope": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "access_token",
+     "token_type",
+     "expires_in",
+     "scope"
+    ]
+   },
+   "PartnerMe": {
+    "type": "object",
+    "properties": {
+     "partner": {
+      "type": "object",
+      "properties": {
+       "id": {
+        "type": "string"
+       },
+       "slug": {
+        "type": "string"
+       },
+       "name": {
+        "type": "string"
+       }
+      }
+     },
+     "branding": {
+      "type": "object",
+      "properties": {
+       "logo_url": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "primary_color": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "email_from_name": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "support_email": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "custom_domain": {
+        "type": [
+         "string",
+         "null"
+        ]
+       }
+      }
+     },
+     "app": {
+      "type": "object",
+      "properties": {
+       "id": {
+        "type": "string"
+       },
+       "client_id": {
+        "type": "string"
+       },
+       "scopes": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   },
+   "Tenant": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string",
+      "format": "uuid"
+     },
+     "name": {
+      "type": "string"
+     },
+     "slug": {
+      "type": "string"
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "active",
+       "suspended"
+      ]
+     }
+    },
+    "required": [
+     "id",
+     "name",
+     "slug",
+     "status"
+    ]
+   },
+   "NewTenant": {
+    "type": "object",
+    "properties": {
+     "name": {
+      "type": "string"
+     },
+     "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{1,62}$"
+     }
+    },
+    "required": [
+     "name",
+     "slug"
+    ]
+   },
+   "TenantPage": {
+    "type": "object",
+    "required": [
+     "tenants"
+    ],
+    "properties": {
+     "tenants": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/Tenant"
+      }
+     },
+     "data": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/Tenant"
+      },
+      "deprecated": true,
+      "description": "Same as `tenants` (kept for early v1 clients)."
+     },
+     "next_cursor": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "Reserved for pagination; currently always null (every tenant is returned in one page)."
+     }
+    }
+   },
+   "LoginRequest": {
+    "type": "object",
+    "properties": {
+     "tenant": {
+      "type": "string",
+      "deprecated": true,
+      "description": "DEPRECATED. Clinic code is no longer needed: the email is looked up across clinics. If sent, it only narrows the clinics the credentials already prove; any mismatch returns the same generic 401."
+     },
+     "email": {
+      "type": "string"
+     },
+     "password": {
+      "type": "string"
+     },
+     "totp": {
+      "type": "string"
+     },
+     "recovery_code": {
+      "type": "string"
+     },
+     "device_name": {
+      "type": "string"
+     },
+     "tenant_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Optional: choose this clinic when the account belongs to several."
+     }
+    },
+    "required": [
+     "email",
+     "password"
+    ],
+    "description": "Legacy password sign-in (server flag SUNCHARTS_USER_PASSWORD_LOGIN). Prefer passkeys or email magic links."
+   },
+   "RefreshRequest": {
+    "type": "object",
+    "properties": {
+     "refresh_token": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "refresh_token"
+    ]
+   },
+   "UserTokens": {
+    "type": "object",
+    "properties": {
+     "access_token": {
+      "type": "string"
+     },
+     "refresh_token": {
+      "type": "string"
+     },
+     "expires_in": {
+      "type": "integer"
+     },
+     "token_type": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "access_token",
+     "refresh_token",
+     "expires_in"
+    ]
+   },
+   "Me": {
+    "type": "object",
+    "additionalProperties": true
+   },
+   "Today": {
+    "type": "object",
+    "properties": {
+     "connection_id": {
+      "type": "string"
+     },
+     "date": {
+      "type": "string"
+     },
+     "tz": {
+      "type": "string"
+     },
+     "scope": {
+      "type": "string"
+     },
+     "kpis": {
+      "type": "object"
+     },
+     "now": {},
+     "next": {},
+     "timeline": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/Appointment"
+      }
+     }
+    }
+   },
+   "Appointment": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+     "start": {
+      "type": "string"
+     },
+     "end": {
+      "type": "string"
+     },
+     "provider_uuid": {
+      "type": "string"
+     },
+     "status": {
+      "type": "string"
+     },
+     "patient": {
+      "type": "object",
+      "properties": {
+       "name": {
+        "type": "string"
+       },
+       "uuid": {
+        "type": "string"
+       },
+       "pid": {},
+       "dob": {
+        "type": "string"
+       },
+       "mrn": {
+        "type": "string"
+       }
+      }
+     },
+     "title": {
+      "type": "string"
+     },
+     "provider": {},
+     "facility": {},
+     "duration_min": {
+      "type": "integer"
+     }
+    }
+   },
+   "FhirBundle": {
+    "type": "object",
+    "properties": {
+     "resourceType": {
+      "const": "Bundle"
+     },
+     "total": {
+      "type": "integer"
+     },
+     "link": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "properties": {
+        "relation": {
+         "type": "string"
+        },
+        "url": {
+         "type": "string"
+        }
+       }
+      }
+     },
+     "entry": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "properties": {
+        "resource": {
+         "type": "object"
+        }
+       }
+      }
+     }
+    }
+   },
+   "ClinicSelection": {
+    "type": "object",
+    "description": "Returned instead of tokens when the email belongs to several clinics. Call /api/v1/auth/login/select with one tenant_id.",
+    "properties": {
+     "clinic_selection_required": {
+      "type": "boolean"
+     },
+     "selection_token": {
+      "type": "string"
+     },
+     "expires_in": {
+      "type": "integer"
+     },
+     "clinics": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/ClinicMembership"
+      }
+     }
+    },
+    "required": [
+     "clinic_selection_required",
+     "selection_token",
+     "clinics"
+    ]
+   },
+   "ClinicMembership": {
+    "type": "object",
+    "properties": {
+     "tenant_id": {
+      "type": "string",
+      "format": "uuid"
+     },
+     "name": {
+      "type": "string"
+     },
+     "role": {
+      "type": "string"
+     }
+    }
+   },
+   "SelectClinicRequest": {
+    "type": "object",
+    "properties": {
+     "selection_token": {
+      "type": "string"
+     },
+     "tenant_id": {
+      "type": "string",
+      "format": "uuid"
+     },
+     "totp": {
+      "type": "string"
+     },
+     "recovery_code": {
+      "type": "string"
+     },
+     "device_name": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "selection_token",
+     "tenant_id"
+    ]
+   },
+   "MagicStartRequest": {
+    "type": "object",
+    "properties": {
+     "email": {
+      "type": "string"
+     },
+     "device_nonce": {
+      "type": "string",
+      "description": "16-200 random chars, stable per device; links/codes are bound to it. Required for first-party calls; optional on partner-relayed calls (with X-Partner-Authorization), where they are bound to your app instead."
+     },
+     "captcha_token": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "email"
+    ]
+   },
+   "MagicVerifyRequest": {
+    "type": "object",
+    "description": "Either token (from the link) or email + 6-digit code.",
+    "properties": {
+     "device_nonce": {
+      "type": "string",
+      "description": "16-200 random chars, stable per device; links/codes are bound to it. Required for first-party calls; optional on partner-relayed calls (with X-Partner-Authorization), where they are bound to your app instead."
+     },
+     "token": {
+      "type": "string"
+     },
+     "email": {
+      "type": "string"
+     },
+     "code": {
+      "type": "string"
+     },
+     "tenant_id": {
+      "type": "string",
+      "format": "uuid"
+     },
+     "device_name": {
+      "type": "string"
+     }
+    },
+    "required": []
+   },
+   "MagicSent": {
+    "type": "object",
+    "properties": {
+     "status": {
+      "type": "string"
+     },
+     "message": {
+      "type": "string"
+     },
+     "resend_after": {
+      "type": "integer"
+     },
+     "expires_in": {
+      "type": "integer"
+     },
+     "code_length": {
+      "type": "integer"
+     },
+     "delivery": {
+      "$ref": "#/components/schemas/Delivery"
+     }
+    }
+   },
+   "Delivery": {
+    "type": [
+     "object",
+     "null"
+    ],
+    "description": "Partner email delivery only: the secret to deliver to the user (never present without X-Partner-Authorization).",
+    "properties": {
+     "email": {
+      "type": "string"
+     },
+     "token": {
+      "type": "string"
+     },
+     "code": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "6-digit code (null for signup_verify)"
+     },
+     "purpose": {
+      "type": "string",
+      "enum": [
+       "signin",
+       "signup",
+       "signup_verify"
+      ]
+     },
+     "expires_in_mins": {
+      "type": "integer"
+     }
+    }
+   },
+   "OAuthTokenRequest": {
+    "type": "object",
+    "required": [
+     "grant_type"
+    ],
+    "properties": {
+     "grant_type": {
+      "type": "string",
+      "const": "client_credentials"
+     },
+     "client_id": {
+      "type": "string",
+      "description": "Omit when using HTTP Basic"
+     },
+     "client_secret": {
+      "type": "string",
+      "description": "Omit when using HTTP Basic"
+     },
+     "scope": {
+      "type": "string",
+      "description": "Space-separated subset of the app's scopes"
+     }
+    }
+   },
+   "OAuthError": {
+    "type": "object",
+    "required": [
+     "error"
+    ],
+    "properties": {
+     "error": {
+      "type": "string",
+      "enum": [
+       "invalid_request",
+       "invalid_client",
+       "unsupported_grant_type",
+       "invalid_scope"
+      ]
+     },
+     "error_description": {
+      "type": "string"
+     }
+    }
+   },
+   "AuthSettings": {
+    "type": "object",
+    "properties": {
+     "rp_id": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "example": "example.com"
+     },
+     "auth_origin": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "example": "https://app.example.com"
+     },
+     "email_link_base": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "example": "https://app.example.com/auth/link?t={token}"
+     },
+     "android_cert_sha256": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "example": [
+       "AB:CD:…"
+      ]
+     },
+     "apple_app_ids": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "example": [
+       "ABCDE12345.com.example.app"
+      ]
+     },
+     "email_delivery": {
+      "type": "string",
+      "enum": [
+       "platform",
+       "partner"
+      ]
+     },
+     "custom_domain_verified": {
+      "type": "boolean",
+      "readOnly": true
+     },
+     "platform_delivery_available": {
+      "type": "boolean",
+      "readOnly": true
+     }
+    }
+   },
+   "TenantUser": {
+    "type": "object",
+    "required": [
+     "id",
+     "email",
+     "role",
+     "status"
+    ],
+    "properties": {
+     "id": {
+      "type": "string",
+      "format": "uuid"
+     },
+     "email": {
+      "type": "string"
+     },
+     "display_name": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "role": {
+      "type": "string",
+      "description": "owner | clinician | front_desk | read_only (new roles may be added)"
+     },
+     "status": {
+      "type": "string",
+      "description": "active | deactivated"
+     },
+     "created_at": {
+      "type": "string",
+      "format": "date-time"
+     }
+    }
+   },
+   "TenantUsers": {
+    "type": "object",
+    "required": [
+     "users"
+    ],
+    "properties": {
+     "users": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/TenantUser"
+      }
+     }
+    }
+   },
+   "NewInvite": {
+    "type": "object",
+    "required": [
+     "email"
+    ],
+    "properties": {
+     "email": {
+      "type": "string"
+     },
+     "role": {
+      "type": "string",
+      "default": "clinician"
+     },
+     "display_name": {
+      "type": "string"
+     }
+    }
+   },
+   "InviteDelivery": {
+    "type": "object",
+    "description": "`transport: partner` → we sent nothing; deliver `url` (or build your own from `token`). Otherwise the mail transport's result.",
+    "properties": {
+     "transport": {
+      "type": "string"
+     },
+     "delivered": {
+      "type": "boolean"
+     },
+     "email": {
+      "type": "string"
+     },
+     "token": {
+      "type": "string"
+     },
+     "code": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "Always null for invites (there is no code to enter)"
+     },
+     "purpose": {
+      "type": "string",
+      "const": "invite"
+     },
+     "url": {
+      "type": "string"
+     },
+     "expires_in_mins": {
+      "type": "integer"
+     }
+    }
+   },
+   "Invite": {
+    "type": "object",
+    "required": [
+     "id",
+     "email",
+     "role",
+     "expires_at",
+     "invite_url",
+     "delivery"
+    ],
+    "properties": {
+     "id": {
+      "type": "string",
+      "format": "uuid"
+     },
+     "email": {
+      "type": "string"
+     },
+     "role": {
+      "type": "string"
+     },
+     "expires_at": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "invite_url": {
+      "type": "string",
+      "description": "On your `auth_origin` for partner tenants"
+     },
+     "app_link": {
+      "type": "string"
+     },
+     "delivery": {
+      "$ref": "#/components/schemas/InviteDelivery"
+     }
+    }
+   },
+   "HealthStatus": {
+    "type": "object",
+    "required": [
+     "status"
+    ],
+    "properties": {
+     "status": {
+      "type": "string",
+      "example": "ok"
+     },
+     "service": {
+      "type": "string"
+     },
+     "product": {
+      "type": "string"
+     },
+     "version": {
+      "type": "string"
+     }
+    }
+   }
+  }
+ }
+}

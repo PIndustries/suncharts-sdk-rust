@@ -10,6 +10,17 @@
 //! invites) — including [`Client::forward`] — carry `X-Partner-Authorization` automatically, so the
 //! platform applies your app's white-label auth settings (passkey RP, email delivery, link origin).
 //!
+//! Every operation in the spec is also available, typed, under [`generated`] (regenerated from
+//! `openapi.json` on every API change); [`Client::api_config`] / [`UserSession::api_config`] hand those
+//! functions an authenticated configuration:
+//!
+//! ```no_run
+//! # async fn run(client: suncharts_sdk::Client) -> Result<(), Box<dyn std::error::Error>> {
+//! use suncharts_sdk::generated::apis::partner_api;
+//! let me = partner_api::partner_me(&client.api_config().await?).await?;
+//! # Ok(()) }
+//! ```
+//!
 //! ```no_run
 //! # async fn run() -> suncharts_sdk::Result<()> {
 //! use suncharts_sdk::{Client, LoginRequest, TodayQuery, SANDBOX_BASE_URL};
@@ -24,6 +35,7 @@
 //! ```
 
 mod error;
+pub mod generated;
 mod models;
 
 use std::{
@@ -308,6 +320,20 @@ impl Client {
             }
         }
         Ok(r)
+    }
+
+    /// Authenticated configuration for the generated operations in [`generated::apis`] (partner
+    /// credentials as the bearer; the OAuth token is fetched or refreshed as needed). Build a new one per
+    /// batch of calls rather than caching it: client-credentials tokens expire after an hour.
+    pub async fn api_config(&self) -> Result<generated::apis::configuration::Configuration> {
+        let mut c = generated::apis::configuration::Configuration::new();
+        c.base_path = self.inner.base.clone();
+        c.client = self.inner.http.clone();
+        c.user_agent = Some(concat!("suncharts-sdk-rust/", env!("CARGO_PKG_VERSION")).into());
+        if self.has_partner_auth() {
+            c.bearer_access_token = Some(self.partner_bearer(false).await?);
+        }
+        Ok(c)
     }
 
     // ------------------------------------------------------------ partner auth
@@ -656,6 +682,14 @@ impl UserSession {
     /// Current tokens (persist these to resume later).
     pub async fn tokens(&self) -> UserTokens {
         self.state.lock().await.0.clone()
+    }
+
+    /// Authenticated configuration for the generated end-user operations in [`generated::apis`]
+    /// (the user's access token, refreshed if it is about to expire).
+    pub async fn api_config(&self) -> Result<generated::apis::configuration::Configuration> {
+        let mut c = self.client.api_config().await?;
+        c.bearer_access_token = Some(self.bearer(false).await?);
+        Ok(c)
     }
 
     async fn bearer(&self, force: bool) -> Result<String> {
