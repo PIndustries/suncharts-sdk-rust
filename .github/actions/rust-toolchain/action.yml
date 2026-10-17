@@ -1,0 +1,19 @@
+name: rust-toolchain (fleet-safe)
+description: >-
+  Installs a Rust toolchain into this runner's own tool cache (CARGO_HOME/RUSTUP_HOME under
+  RUNNER_TOOL_CACHE) so the five phx runners on the shared fleet host never race on one ~/.rustup.
+inputs:
+  toolchain: { description: Rust toolchain, default: stable }
+  components: { description: Extra components (comma separated), default: "" }
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        echo "CARGO_HOME=$RUNNER_TOOL_CACHE/cargo" >> "$GITHUB_ENV"
+        echo "RUSTUP_HOME=$RUNNER_TOOL_CACHE/rustup" >> "$GITHUB_ENV"
+        echo "$RUNNER_TOOL_CACHE/cargo/bin" >> "$GITHUB_PATH"
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
